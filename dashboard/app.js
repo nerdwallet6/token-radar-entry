@@ -31,23 +31,28 @@
   function chainsOf(r) { return (r.chains && r.chains.length) ? r.chains : []; }
 
   /* The model, in one function: impliedValue() recomputes a row from the snapshot figures so the
-     page and the board agree. base = TVL x base_multiple; growth is clamped, then weighted;
-     maturity rises with age up to maturity_days; unknown age uses unknown_age_days. */
+     page and the board agree. base = TVL x base_multiple; growth is clamped, then weighted, plus a
+     momentum step when the clamped growth beats momentum_threshold; maturity rises with age up to
+     maturity_days; unknown age uses unknown_age_days. Category and chain multipliers ride on the
+     row itself (category_multiplier / chain_multiplier), defaulting to 1 when absent. */
   function impliedValue(r) {
     var g = Math.min(M.growth_cap == null ? 120 : M.growth_cap, Math.max(M.growth_floor == null ? -60 : M.growth_floor, r.change_7d == null ? 0 : r.change_7d));
-    var gm = 1 + (g / 100) * (M.growth_weight == null ? 0.5 : M.growth_weight);
+    var mom = (M.momentum_threshold != null && M.momentum_bonus != null && g > M.momentum_threshold) ? 1 + M.momentum_bonus : 1;
+    var gm = (1 + (g / 100) * (M.growth_weight == null ? 0.5 : M.growth_weight)) * mom;
     var a = r.age_days == null ? (M.unknown_age_days == null ? 365 : M.unknown_age_days) : r.age_days;
     var mm = (M.maturity_floor == null ? 0.6 : M.maturity_floor) +
       (Math.min(Math.max(a, 0), M.maturity_days == null ? 1095 : M.maturity_days) / (M.maturity_days == null ? 1095 : M.maturity_days)) *
       (M.maturity_range == null ? 0.4 : M.maturity_range);
+    var cat = typeof r.category_multiplier === 'number' ? r.category_multiplier : 1;
+    var chn = typeof r.chain_multiplier === 'number' ? r.chain_multiplier : 1;
     var base = r.tvl_usd * (M.base_multiple == null ? 0.25 : M.base_multiple);
-    return { base: base, growthPct: g, growthMult: gm, maturityMult: mm, implied: Math.max(1, Math.round(base * gm * mm)) };
+    return { base: base, growthPct: g, growthMult: gm, momentum: mom, maturityMult: mm, categoryMult: cat, chainMult: chn, implied: Math.max(1, Math.round(base * gm * mm * cat * chn)) };
   }
   /* Extra multipliers the model worker may attach (e.g. category_multiplier): shown if present. */
   function extraMults(r) {
     var out = [];
     Object.keys(r).forEach(function (k) {
-      if (/_multiplier$/.test(k) && k !== 'growth_multiplier' && k !== 'maturity_multiplier' && typeof r[k] === 'number') {
+      if (/_multiplier$/.test(k) && k !== 'growth_multiplier' && k !== 'maturity_multiplier' && k !== 'category_multiplier' && k !== 'chain_multiplier' && typeof r[k] === 'number') {
         out.push([k.replace(/_/g, ' '), r[k]]);
       }
     });
@@ -167,15 +172,18 @@
     '<section class="panel method" aria-label="Methodology"><div class="panel-head"><h2>How implied value is computed</h2></div><div class="body">' +
     '<div class="formula">impliedValue(row) = round( tvl_usd × ' + (M.base_multiple != null ? M.base_multiple : '?') +
     ' × (1 + clamp(change_7d, ' + (M.growth_floor != null ? M.growth_floor : '?') + ', ' + (M.growth_cap != null ? M.growth_cap : '?') +
-    ') / 100 × ' + (M.growth_weight != null ? M.growth_weight : '?') + ') × (' + (M.maturity_floor != null ? M.maturity_floor : '?') +
+    ') / 100 × ' + (M.growth_weight != null ? M.growth_weight : '?') + ')' + (M.momentum_threshold != null ? ' × (1 + ' + (M.momentum_bonus != null ? M.momentum_bonus : '?') + ' if change_7d &gt; ' + M.momentum_threshold + '%)' : '') +
+    ' × (' + (M.maturity_floor != null ? M.maturity_floor : '?') +
     ' + min(age_days, ' + (M.maturity_days != null ? M.maturity_days : '?') + ') / ' + (M.maturity_days != null ? M.maturity_days : '?') +
-    ' × ' + (M.maturity_range != null ? M.maturity_range : '?') + ') )</div>' +
+    ' × ' + (M.maturity_range != null ? M.maturity_range : '?') + ') × category_multiplier × chain_multiplier )</div>' +
     '<p><b>Base.</b> TVL × ' + (M.base_multiple != null ? M.base_multiple : 'the base multiple') + ' — the size of the protocol, in dollars, is the starting point. ' +
     '<b>Growth.</b> The seven-day TVL change, clamped to ' + (M.growth_floor != null ? M.growth_floor : '?') + '%…+' + (M.growth_cap != null ? M.growth_cap : '?') +
-    '%, then weighted by ' + (M.growth_weight != null ? M.growth_weight : '?') + ': fast-growing TVL is worth more than flat TVL at the same size. ' +
+    '%, then weighted by ' + (M.growth_weight != null ? M.growth_weight : '?') + ': fast-growing TVL is worth more than flat TVL at the same size.' +
+    (M.momentum_threshold != null ? ' A week above +' + M.momentum_threshold + '% earns a momentum step of ×' + (1 + (M.momentum_bonus || 0)).toFixed(2) + ' — a breakout week, not just growth.' : '') + ' ' +
     '<b>Maturity.</b> Age since first listing, up to ' + (M.maturity_days != null ? M.maturity_days : '?') + ' days, lifts the value from ' +
     (M.maturity_floor != null ? M.maturity_floor : '?') + ' toward ' + ((M.maturity_floor != null && M.maturity_range != null) ? (M.maturity_floor + M.maturity_range).toFixed(1) : '?') +
-    ': a protocol that has run longer with no token has a longer record to price. An unlisted age uses ' + (M.unknown_age_days != null ? M.unknown_age_days : '?') + ' days.</p>' +
+    ': a protocol that has run longer with no token has a longer record to price. An unlisted age uses ' + (M.unknown_age_days != null ? M.unknown_age_days : '?') + ' days. ' +
+    '<b>Category and chains.</b> Each row carries its own category_multiplier (what the protocol does) and chain_multiplier (a small premium per extra chain, capped) — the detail panel shows both, and the page recomputes the product from the row’s own figures.</p>' +
     '<div class="cards3"><div class="mini"><h3>One function, every row</h3><p>The same impliedValue() scores every protocol. No name is special-cased and no row is hand-picked; the detail panel recomputes each row and shows whether it matches the board.</p></div>' +
     '<div class="mini"><h3>“Records no token”</h3><p>That means DefiLlama records no market cap, CoinGecko id or symbol for the protocol. It is not proof there is none — a token may exist that its record does not carry.</p></div>' +
     '<div class="mini"><h3>What implied value is not</h3><p>It is the entry’s own claim, derived from this one snapshot. It is not a price, not a prediction of a launch, and not a promise of an airdrop. Farm plans are generic steps from each protocol’s own category, chains, TVL and age.</p></div></div>' +
@@ -255,10 +263,12 @@
       '<dt>Implied value</dt><dd class="big">' + usd(r.implied_value_usd) + '</dd></dl>' +
       '<div class="rule"><h3>Model breakdown — impliedValue()</h3><div class="eq">' +
       'base&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= TVL × ' + (M.base_multiple != null ? M.base_multiple : '?') + ' = <b>' + usd(v.base) + '</b><br>' +
-      'growth&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= clamp(' + pct(r.change_7d) + ') → <b>' + mult(v.growthMult) + '</b><br>' +
-      'maturity&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= age ' + age(r.age_days) + ' → <b>' + mult(v.maturityMult) + '</b>' +
+      'growth&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= clamp(' + pct(r.change_7d) + ')' + (v.momentum > 1 ? ' + momentum ×' + v.momentum.toFixed(2) : '') + ' → <b>' + mult(v.growthMult) + '</b><br>' +
+      'maturity&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= age ' + age(r.age_days) + ' → <b>' + mult(v.maturityMult) + '</b><br>' +
+      'category&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= ' + esc(r.category || 'Other') + ' → <b>' + mult(v.categoryMult) + '</b><br>' +
+      'chain&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= ' + chainsOf(r).length + ' chain' + (chainsOf(r).length === 1 ? '' : 's') + ' → <b>' + mult(v.chainMult) + '</b>' +
       extra.map(function (e) { return '<br>' + esc(e[0]) + ' = <b>' + mult(e[1]) + '</b>'; }).join('') +
-      '<br>implied&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= base × growth × maturity = <b class="tot">' + usd(v.implied) + '</b></div>' +
+      '<br>implied&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= base × growth × maturity × category × chain = <b class="tot">' + usd(v.implied) + '</b></div>' +
       '<p class="check">Recomputed here as <b>' + usd(v.implied) + '</b> — ' + (match ? 'matches the board’s ' + usd(r.implied_value_usd) + '.' : 'differs from the board’s ' + usd(r.implied_value_usd) + '; the data may be stale.') + '</p></div>' +
       '<div class="rule"><h3>Farm plan · ' + steps.length + ' steps</h3><ol class="steps">' +
       steps.map(function (s) { var p = splitStep(s); return '<li>' + esc(p[0]) + (p[1] ? '<span class="cost">' + esc(p[1]) + '</span>' : '') + '</li>'; }).join('') +
